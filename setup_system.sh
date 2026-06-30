@@ -8,6 +8,8 @@
 #   export system_root_app_repo=https://github.com/youruser/your-cluster
 #   export system_root_app_path=system
 #   export cloudflare_token=...
+#   export vps=1.2.3.4
+#   export base_domain=example.com
 #   export harbor_hostname=harbor.example.com
 #   export harbor_initial_password=...
 #   export harbor_chart_version=1.17.2
@@ -37,6 +39,79 @@ retry_command() {
   until eval "$cmd"; do
     echo -e "\033[31mRetrying $cmd\033[0m"
     sleep 15
+  done
+}
+
+cloudflare_api() {
+  local method="$1"
+  local path="$2"
+  local data="${3:-}"
+
+  if [ -n "$data" ]; then
+    curl -fsS -X "$method" "https://api.cloudflare.com/client/v4$path" \
+      -H "Authorization: Bearer $cloudflare_token" \
+      -H "Content-Type: application/json" \
+      --data "$data"
+  else
+    curl -fsS -X "$method" "https://api.cloudflare.com/client/v4$path" \
+      -H "Authorization: Bearer $cloudflare_token" \
+      -H "Content-Type: application/json"
+  fi
+}
+
+find_cloudflare_zone_id() {
+  local domain="$1"
+  local response zone_id
+
+  response=$(cloudflare_api GET "/zones?name=$domain&per_page=1") || return 1
+  zone_id=$(printf '%s' "$response" | jq -r '.result[0].id // empty')
+
+  [ -n "$zone_id" ] || return 1
+  printf '%s' "$zone_id"
+}
+
+upsert_cloudflare_a_record() {
+  local hostname="$1"
+  local zone_id="$2"
+  local response record_id payload success keep_a_record_id
+
+  response=$(cloudflare_api GET "/zones/$zone_id/dns_records?name=$hostname&per_page=100") || return 1
+
+  keep_a_record_id=$(printf '%s' "$response" | jq -r '.result[] | select(.type == "A") | .id' | head -n 1)
+
+  while read -r record_id; do
+    [ -n "$record_id" ] || continue
+    cloudflare_api DELETE "/zones/$zone_id/dns_records/$record_id" > /dev/null || return 1
+  done < <(printf '%s' "$response" | jq -r --arg keep "$keep_a_record_id" '.result[] | select((.type == "CNAME" or .type == "AAAA") or (.type == "A" and .id != $keep)) | .id')
+
+  payload=$(jq -cn --arg name "$hostname" --arg content "$vps" \
+    '{type:"A", name:$name, content:$content, ttl:1, proxied:false}')
+
+  if [ -n "$keep_a_record_id" ]; then
+    success=$(cloudflare_api PUT "/zones/$zone_id/dns_records/$keep_a_record_id" "$payload" | jq -r '.success')
+  else
+    success=$(cloudflare_api POST "/zones/$zone_id/dns_records" "$payload" | jq -r '.success')
+  fi
+
+  [ "$success" = "true" ]
+}
+
+upsert_cloudflare_dns_records() {
+  local domain zone_id record_name
+
+  domain="${base_domain#\*.}"
+  domain="${domain#https://}"
+  domain="${domain#http://}"
+  domain="${domain%%/*}"
+
+  zone_id=$(find_cloudflare_zone_id "$domain") || {
+    echo "Could not find Cloudflare zone for $domain" >&2
+    return 1
+  }
+
+  for record_name in "$domain" "*.$domain"; do
+    echo "Configuring DNS record: $record_name -> $vps"
+    upsert_cloudflare_a_record "$record_name" "$zone_id" || return 1
   done
 }
 
@@ -74,6 +149,9 @@ retry_command "curl -sSL \"https://github.com/helmfile/helmfile/releases/downloa
 # Install yq
 YQ_VERSION=4.44.2
 retry_command "curl -sSL \"https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64\" -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq"
+
+# Point the base domain and wildcard hostnames at this VPS before services wait on them.
+retry_command "upsert_cloudflare_dns_records"
 
 # Deploy the system using Helmfile
 cd ./system
