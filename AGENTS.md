@@ -34,11 +34,12 @@ The setup path is:
 2. The SaaS app SSHes into the customer's VPS.
 3. The VPS clones the generated repo into `/root/ownstack-cluster`.
 4. The VPS runs `setup_system.sh`.
-5. `setup_system.sh` installs system prerequisites and applies `system/helmfile.yaml.gotmpl`.
-6. Helmfile installs Jenkins, Harbor, Traefik, and miscellaneous RBAC.
-7. Kubernetes secrets are created for Cloudflare DNS and the GitHub PAT.
-8. `setup_jenkins_harbor.sh` configures Harbor, Kubernetes namespaces, Jenkins credentials, and the Jenkins GitHub organization folder.
-9. Application repos can then use the shared pipeline library to build, push, and deploy apps.
+5. `setup_system.sh` is the stable shell entrypoint. It runs `ownstackctl` from a local binary, configured binary URL, pinned GitHub Release, or local Go source, then falls back to the legacy shell installer only if needed.
+6. `ownstackctl apply` validates the environment contract, emits structured progress events, and delegates the current install implementation to `scripts/setup_system_legacy.sh`.
+7. The legacy installer installs system prerequisites, configures DNS, applies `system/helmfile.yaml.gotmpl`, creates Kubernetes secrets, and calls `setup_jenkins_harbor.sh`.
+8. Helmfile installs Jenkins, Harbor, Traefik, and miscellaneous RBAC.
+9. `setup_jenkins_harbor.sh` configures Harbor, Kubernetes namespaces, Jenkins credentials, and the Jenkins GitHub organization folder.
+10. Application repos can then use the shared pipeline library to build, push, and deploy apps.
 
 High-level runtime shape:
 
@@ -64,7 +65,12 @@ Jenkins
 
 ## Repository Map
 
-- `setup_system.sh`: main bootstrap entrypoint run on the VPS.
+- `setup_system.sh`: stable bootstrap entrypoint run on the VPS. It chooses and executes `ownstackctl`.
+- `cmd/ownstackctl/`: Go CLI entrypoint. Commands include `plan`, `doctor`, `apply`, and `status`.
+- `internal/installer/`: Go installer package for environment validation, stage definitions, structured progress events, and apply orchestration.
+- `scripts/setup_system_legacy.sh`: current shell implementation of the installer stages. `ownstackctl apply` delegates here while orchestration migrates into Go.
+- `docs/ownstackctl.md`: customer-facing explanation of the CLI and runtime download behavior.
+- `.github/workflows/release-ownstackctl.yml`: builds Linux `amd64` and `arm64` `ownstackctl` binaries and checksums on `ownstackctl-v*` tags.
 - `setup_jenkins_harbor.sh`: post-Helmfile integration script for Harbor, Jenkins, namespaces, and credentials.
 - `system/helmfile.yaml.gotmpl`: declares the core system Helm releases.
 - `system/jenkins.gotmpl`: Jenkins Helm values and JCasC.
@@ -75,9 +81,21 @@ Jenkins
 - `common_helm_library/`: Helm library chart for app deployment helpers.
 - `installations/`: optional add-ons that are not part of the default bootstrap.
 
-## Core Bootstrap: `setup_system.sh`
+## Core Bootstrap: `setup_system.sh` and `ownstackctl`
 
-`setup_system.sh` is the main customer-environment bootstrap. It must remain parameterized by environment variables. Do not hardcode customer-specific values.
+`setup_system.sh` is the stable customer-environment bootstrap entrypoint. It must remain parameterized by environment variables. Do not hardcode customer-specific values.
+
+`setup_system.sh` runs the installer in this order:
+
+1. `./bin/ownstackctl`, when a local binary exists.
+2. `OWNSTACKCTL_URL`, when an explicit binary URL is provided.
+3. A pinned GitHub Release version through `OWNSTACKCTL_VERSION`, defaulting to `ownstackctl-v0.1.0`.
+4. `go run ./cmd/ownstackctl`, when Go is installed.
+5. `scripts/setup_system_legacy.sh` as a fallback.
+
+Release downloads use `OWNSTACKCTL_REPO`, defaulting to `getownstack/ownstack-cluster-template`, and verify checksums when downloading from versioned releases.
+
+`ownstackctl` is customer-visible and source-controlled in this template. Keep it auditable. The CLI should make the stages and environment contract clear rather than hiding infrastructure behavior behind an opaque binary.
 
 Expected environment contract:
 
@@ -102,8 +120,10 @@ Expected environment contract:
 - `jenkins_github_org_folder_repo_filter` optional, default `*`
 - `jenkins_jenkinsfile_path` optional, default `infrastructure/Jenkinsfile`
 
-Bootstrap responsibilities:
+Current bootstrap responsibilities:
 
+- Validate required environment variables before mutating infrastructure.
+- Emit structured progress lines such as `ownstack.event=stage_started id="platform" title="Platform install"` for UI consumers.
 - Install k3s with bundled Traefik disabled.
 - Configure kubeconfig at `~/.kube/config`.
 - Install Docker and base packages.
@@ -116,6 +136,8 @@ Bootstrap responsibilities:
 - Run `setup_jenkins_harbor.sh`.
 - Log elapsed setup duration.
 
+`scripts/setup_system_legacy.sh` owns most implementation details today. Move behavior into Go incrementally, preserving the external environment contract and structured event output.
+
 Current retry behavior uses `retry_command`, which repeats commands until success. This is useful for fresh VPS package/network timing, but be careful when wrapping non-idempotent commands. Prefer idempotent `kubectl apply`, `--dry-run=client -o yaml | kubectl apply -f -`, existence checks, or explicit create-or-skip logic.
 
 ## Post-Setup Integration: `setup_jenkins_harbor.sh`
@@ -124,7 +146,7 @@ This script wires the installed services together after Helmfile has installed t
 
 Responsibilities:
 
-- Wait until Harbor reports healthy.
+- Wait until Harbor reports healthy. Bootstrap-time service checks use curl with `--insecure` because first-run internal checks can see temporary/self-signed TLS before public ACME trust is usable from the VPS.
 - Delete existing Harbor projects.
 - Create the `product` Harbor project.
 - Create a system-level Harbor robot account named `supermario`.
@@ -383,7 +405,8 @@ Current high-privilege areas:
 - Jenkins stores GitHub PAT and Harbor robot credentials.
 - Harbor robot account has broad project permissions.
 - Kubernetes dashboard optional install creates a cluster-admin service account.
-- Setup scripts run as root on the VPS.
+- `setup_system.sh`, `ownstackctl apply`, and legacy setup scripts run as root on the VPS.
+- Versioned `ownstackctl` release downloads are checksum-verified by the bootstrap entrypoint.
 
 Rules for agents:
 
@@ -424,7 +447,9 @@ There is no full automated test suite. Do not run live infrastructure commands w
 Safe static checks:
 
 ```bash
+go test ./...
 bash -n setup_system.sh
+bash -n scripts/setup_system_legacy.sh
 bash -n setup_jenkins_harbor.sh
 ```
 
@@ -439,6 +464,15 @@ helmfile template
 ```
 
 For Groovy shared-library changes, at minimum do a careful static review. Jenkins pipeline syntax often needs a real Jenkins context, so mention any residual validation gap.
+
+For `ownstackctl` release changes, verify local CLI behavior with safe commands such as:
+
+```bash
+go run ./cmd/ownstackctl plan
+go run ./cmd/ownstackctl doctor
+```
+
+`doctor` validates the environment contract; use dummy values only when you are not invoking `apply`.
 
 ## Change Guidelines
 
