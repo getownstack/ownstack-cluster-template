@@ -37,7 +37,9 @@ if [ -n "${OWNSTACKCTL_URL:-}" ]; then
   download_and_run "$OWNSTACKCTL_URL" "${OWNSTACKCTL_CHECKSUM_URL:-}"
 fi
 
-if [ -n "${OWNSTACKCTL_VERSION:-}" ]; then
+OWNSTACKCTL_VERSION="${OWNSTACKCTL_VERSION:-ownstackctl-v0.1.0}"
+
+if [ -n "$OWNSTACKCTL_VERSION" ]; then
   case "$(uname -m)" in
     x86_64|amd64) ownstack_arch="amd64" ;;
     aarch64|arm64) ownstack_arch="arm64" ;;
