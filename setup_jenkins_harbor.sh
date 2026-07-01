@@ -13,6 +13,10 @@ harbor_url="https://$harbor_hostname"
 #   brew install jq
 
 # Script
+curl() {
+  command curl --insecure "$@"
+}
+
 retry_command() {
   local cmd="$1"
   echo -e "\033[34mRunning $cmd\033[0m"
