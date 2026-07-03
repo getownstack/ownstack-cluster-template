@@ -280,6 +280,7 @@ Current globals:
 - `runPipeline(applicationIds)`: orchestrates build, push, and deploy stages. Accepts one string or a list/string array.
 - `dockerBuild(applicationId)`: builds `product/<applicationId>:<branch>-<sha>` from `infrastructure/<applicationId>/Dockerfile`.
 - `dockerPush(applicationId)`: tags and pushes the image to `IMAGE_REGISTRY` using `harbor-robot`.
+- `beforeDeployment(applicationId)`: if `infrastructure/<applicationId>/before-deployment.sh` exists, runs it from the Helm/Kubectl container after image push and before Helm deploy. It passes `APPLICATION_ID`, `RELEASE_NAME`, `NAMESPACE`, `IMAGE`, `IMAGE_REGISTRY`, `IMAGE_REPOSITORY_PROJECT`, and `IMAGE_TAG`.
 - `helmDeploy(applicationId)`: checks out the cluster repo, copies `common_helm_library` into the app chart, and deploys with Helm to `prod`.
 - `agentPodTemplate()`: defines the Kubernetes pod agent with Docker and Helm containers, mounting the host Docker socket.
 - `values()`: shared defaults such as credential ID, container images, and image project name.
@@ -289,6 +290,7 @@ Application repo contract:
 ```text
 infrastructure/Jenkinsfile
 infrastructure/<applicationId>/Dockerfile
+infrastructure/<applicationId>/before-deployment.sh  # optional
 infrastructure/<applicationId>/helm/Chart.yaml
 infrastructure/<applicationId>/helm/values.yaml
 infrastructure/<applicationId>/helm/templates/*.yaml
@@ -309,6 +311,7 @@ runPipeline(['api', 'worker'])
 Important current behavior:
 
 - Build and push stages run app IDs in parallel.
+- Before-deploy hooks run after push and before Helm deploy.
 - Deploy stage runs app IDs sequentially.
 - Deploy namespace is currently hardcoded to `prod`.
 - Docker builds use the host Docker socket through the agent pod.

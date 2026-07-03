@@ -53,6 +53,15 @@ def call(Object applicationIds) {
                     }
                 }
             }
+            stage('Before Deploy') {
+                steps {
+                    script {
+                        ids.each { id ->
+                            beforeDeployment(id)
+                        }
+                    }
+                }
+            }
             stage('Deploy') {
                 steps {
                     script {
