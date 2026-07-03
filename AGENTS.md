@@ -23,6 +23,7 @@ Ownstack should let a user bring a fresh Ubuntu VPS and a domain, then receive a
 - `dev`, `qa`, and `prod` namespaces prepared for deployments.
 - Harbor robot credentials wired into Jenkins and Kubernetes pull secrets.
 - A simple application repo convention: a tiny `Jenkinsfile`, a Dockerfile, and a Helm chart.
+- Optional pre-deploy hooks for app-specific steps such as database migrations.
 
 The user should own the VPS, cluster, registry, Jenkins instance, and generated cluster repo. Ownstack should not require ongoing hosted control-plane access after setup.
 
@@ -39,7 +40,7 @@ The setup path is:
 7. The legacy installer installs system prerequisites, configures DNS, applies `system/helmfile.yaml.gotmpl`, creates Kubernetes secrets, and calls `setup_jenkins_harbor.sh`.
 8. Helmfile installs Jenkins, Harbor, Traefik, and miscellaneous RBAC.
 9. `setup_jenkins_harbor.sh` configures Harbor, Kubernetes namespaces, Jenkins credentials, and the Jenkins GitHub organization folder.
-10. Application repos can then use the shared pipeline library to build, push, and deploy apps.
+10. Application repos can then use the shared pipeline library to build, push, run optional pre-deploy hooks, and deploy apps.
 
 High-level runtime shape:
 
@@ -60,6 +61,7 @@ Jenkins
   +--> starts Kubernetes pod agents
   +--> builds Docker images
   +--> pushes to Harbor
+  +--> runs optional app pre-deploy hooks
   +--> deploys Helm charts to Kubernetes
 ```
 
